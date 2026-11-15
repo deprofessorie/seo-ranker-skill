@@ -1,0 +1,10 @@
+---
+description: Agency SEO Ranker — 29-point audit checklist for AI-built websites
+alwaysApply: true
+---
+
+At the start of any website-audit task, follow the `agency-seo-ranker` skill
+(`SKILL.md` in the same repo). Run the 29-item checklist across 7 phases
+in order — crawlability first, competition last. Score each item 0–3
+(out of 87 total). Return a scorecard table, prioritized fix list, and a
+30-day improvement plan. Read SKILL.md once per chat, not on every turn.

@@ -1,6 +1,8 @@
 # Agency SEO Ranker
 
-**29-point SEO audit checklist for AI-generated websites.** Diagnose crawlability, on-page signals, Core Web Vitals, legal compliance, and competitive positioning — then remediate with confidence.
+**29-point SEO audit checklist for AI-generated websites — works across any AI agent.**
+
+Diagnose crawlability, on-page signals, Core Web Vitals, legal compliance, and competitive positioning, then remediate with confidence. Works in Claude Code, Cursor, GitHub Copilot, Gemini CLI, Codex, OpenCode, and any agent that reads instruction files.
 
 ```
 you: "audit this AI-built site"
@@ -16,39 +18,46 @@ you: "audit this AI-built site"
 
 Score each item 0–3. Total: 87. Anything below 52 needs serious work.
 
-## What it does
+## Supported agents
 
-| Capability | How |
-| --- | --- |
-| **Crawlability audit** | Validates sitemap.xml completeness, robots.txt coverage, noindex removal, canonical self-reference. |
-| **On-page signal review** | Checks meta title uniqueness/density, internal link depth matrix, broken-link crawl. |
-| **Performance scoring** | Image weight budgets, LCP / INP / CLS thresholds, mobile tap-target sizing. |
-| **Semantic HTML check** | H1-per-page enforcement, heading hierarchy walk, slug hygiene, OG tag set. |
-| **Structured data validation** | JSON-LD schema present + valid via Google Rich Results Test. |
-| **Trust & legal compliance** | llms.txt, privacy policy, cookie policy, contact page presence and quality. |
-| **Content humanization** | Sentence-length variance, transition-word density, passive-voice ratio targets. |
-| **Design alignment** | Apple HIG whitespace rules, Google Material 3 / WCAG 2.2 AA contrast checks. |
-| **Competitive gap analysis** | Top-5 SERP competitor extraction → technical + content diff → prioritized action list. |
+| Agent | Adapter file | How it loads |
+|-------|-------------|--------------|
+| **Claude Code** | [SKILL.md](./SKILL.md) | `/agency-seo-ranker` or auto-detected |
+| **Cursor** | [adapters/cursor/agency-seo-ranker.mdc](./adapters/cursor/agency-seo-ranker.mdc) | `alwaysApply: true` — runs in every chat |
+| **GitHub Copilot** | [.github/copilot-instructions.md](./.github/copilot-instructions.md) | Picked up from `.github/` in the workspace |
+| **Gemini CLI** | [.gemini/AGENTS.md](./.gemini/AGENTS.md) | Loaded as project agent instructions |
+| **Codex / OpenCode** | [AGENTS.md](./AGENTS.md) | Read as general-purpose agent instructions |
+
+Each adapter points back to the same source-of-truth [SKILL.md](./SKILL.md) so the checklist stays consistent everywhere.
 
 ## Install
 
-Place `SKILL.md` into your Claude Code skills directory:
+### Claude Code (global — available in every project)
 
 ```bash
-# Global install (available in every project)
-cp -r agency-seo-ranker/ ~/.claude/skills/
-
-# Or project-local install
-cp SKILL.md <your-project>/.claude/skills/
+cp -r ~/.claude/skills/agency-seo-ranker/ ~/.claude/skills/
+# or from this repo:
+git clone https://github.com/deprofessorie/seo-ranker-skill.git
+cp -r seo-ranker-skill ~/.claude/skills/agency-seo-ranker
 ```
 
-Then invoke anytime in a chat:
+Then type `/agency-seo-ranker` in any chat.
 
-```
-/agency-seo-ranker
-```
+### Cursor
 
-Or let it auto-load when the skill is detected for the task.
+Place the repo (or just the `adapters/cursor/` folder) inside your project. Cursor picks up `.mdc` files automatically. The skill applies to all chats via `alwaysApply: true`.
+
+### GitHub Copilot
+
+Copilot Reads instructions from `.github/copilot-instructions.md` at the workspace root. Clone this repo into your project or copy the single file into `.github/copilot-instructions.md`.
+
+### Gemini CLI
+
+Copy [`.gemini/AGENTS.md`](./.gemini/AGENTS.md) into your project's `.gemini/AGENTS.md` (create the directory if needed). Gemini loads it on project open.
+
+### Codex / OpenCode / Other Agents
+
+Copy [AGENTS.md](./AGENTS.md) to the project root. These agents read it as general instruction context.
 
 ## The 29-item checklist at a glance
 
@@ -104,6 +113,28 @@ Each item scores **0–3**:
 | 52–77 | Good — fix top 3 lowest-scoring items |
 | 26–51 | Poor — major SEO overhaul needed |
 | 0–25 | Critical — site will not rank without intervention |
+
+## Repo structure
+
+```
+seo-ranker-skill/
+├── SKILL.md                      # Source of truth — full 29-item checklist
+├── README.md                     # This file
+├── AGENTS.md                     # Codex / OpenCode generic instructions
+├── LICENSE                       # MIT
+├── adapters/
+│   ├── bootstrap.md              # Always-on bootstrap marker
+│   └── cursor/
+│       └── agency-seo-ranker.mdc # Cursor .mdc adapter (alwaysApply)
+├── .github/
+│   └── copilot-instructions.md   # GitHub Copilot hook
+├── .gemini/
+│   └── AGENTS.md                 # Gemini CLI hook
+├── docs/
+│   └── usage.md                  # Tool references & AI trap patterns
+└── examples/
+    └── audit-template.md         # Ready-to-fill scorecard template
+```
 
 ## Related Skills
 
