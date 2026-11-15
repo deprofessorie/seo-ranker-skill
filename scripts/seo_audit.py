@@ -12,6 +12,7 @@ Google PageSpeed Insights API (--pagespeed-key) integrations.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import ipaddress
 import json
 import os
@@ -25,6 +26,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -1139,12 +1141,169 @@ def _summarize_competitor(comp_url: str, timeout: int, allow_private: bool, rend
     }
 
 
+def check_external_links(pages: list[PageData], timeout: int = 8, allow_private: bool = False, max_urls: int = 30) -> list[str]:
+    """Concurrently verify outbound HTTP(S) links and image URLs; return broken ones."""
+    urls: list[str] = []
+    seen: set[str] = set()
+    for p in pages:
+        candidates = [l["href"] for l in p.links] + [img["src"] for img in p.images]
+        for u in candidates:
+            if u.startswith(("http://", "https://")) and u not in seen:
+                seen.add(u)
+                urls.append(u)
+                if len(urls) >= max_urls:
+                    break
+        if len(urls) >= max_urls:
+            break
+
+    def _probe(url: str) -> str | None:
+        try:
+            validate_url(url, allow_private=allow_private)
+        except ValueError:
+            return None
+        handler = SafeRedirectHandler(allow_private=allow_private)
+        opener = urllib.request.build_opener(handler)
+        for method in ("HEAD", "GET"):
+            req = urllib.request.Request(url, method=method, headers={"User-Agent": USER_AGENT})
+            try:
+                with opener.open(req, timeout=timeout) as resp:
+                    return None if resp.status < 400 else f"{url} (HTTP {resp.status})"
+            except urllib.error.HTTPError as err:
+                if err.code == 405 and method == "HEAD":
+                    continue
+                return f"{url} (HTTP {err.code})"
+            except (urllib.error.URLError, ValueError):
+                return f"{url} (unreachable)"
+        return None
+
+    broken: list[str] = []
+    if not urls:
+        return broken
+    with ThreadPoolExecutor(max_workers=min(8, len(urls))) as pool:
+        for res in pool.map(_probe, urls):
+            if res:
+                broken.append(res)
+    return broken
+
+
+def diff_sitemap_and_pages(sitemap: str | None, pages: list[PageData]) -> dict[str, list[str]]:
+    """Compare sitemap.xml URLs with crawled/local pages to find orphans and unindexed routes."""
+    page_slugs = {p.slug.rstrip("/") or "/" for p in pages}
+    if not sitemap:
+        return {"orphan_pages": [], "missing_from_sitemap": sorted(page_slugs)}
+    try:
+        root = ET.fromstring(sitemap)
+    except ET.ParseError:
+        return {"orphan_pages": [], "missing_from_sitemap": []}
+    sitemap_paths: set[str] = set()
+    for el in root.iter():
+        if el.tag.endswith("loc") and el.text:
+            path = urllib.parse.urlparse(el.text.strip()).path.rstrip("/") or "/"
+            sitemap_paths.add(path)
+    return {
+        "orphan_pages": sorted(sitemap_paths - page_slugs),
+        "missing_from_sitemap": sorted(page_slugs - sitemap_paths),
+    }
+
+
+def detect_thin_and_duplicate_pages(pages: list[PageData], min_words: int = 150) -> dict[str, list[str]]:
+    """Flag thin pages (<min_words) and pages with duplicate body text."""
+    thin: list[str] = []
+    seen_hashes: dict[str, str] = {}
+    duplicates: list[str] = []
+    for p in pages:
+        words = p.body_text.split()
+        if len(words) < min_words:
+            thin.append(f"{p.slug} ({len(words)}w)")
+        if len(words) >= 30:
+            digest = hashlib.sha256(" ".join(words).lower().encode("utf-8")).hexdigest()
+            if digest in seen_hashes:
+                duplicates.append(f"{p.slug} == {seen_hashes[digest]}")
+            else:
+                seen_hashes[digest] = p.slug
+    return {"thin_pages": thin, "duplicate_pages": duplicates}
+
+
+def generate_starter_files(root: Path, pages: list[PageData], base_url: str = "https://example.com") -> list[str]:
+    """Generate missing starter sitemap.xml, robots.txt, and llms.txt in a local directory."""
+    resolved_root = root.resolve()
+    created: list[str] = []
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    robots_path = resolved_root / "robots.txt"
+    if not robots_path.exists():
+        robots_path.write_text(
+            f"User-agent: *\nAllow: /\nDisallow: /admin/\nDisallow: /api/\nSitemap: {base_url.rstrip('/')}/sitemap.xml\n",
+            encoding="utf-8",
+        )
+        created.append("robots.txt")
+
+    sitemap_path = resolved_root / "sitemap.xml"
+    if not sitemap_path.exists():
+        slugs = sorted({p.slug for p in pages} or {"/"})
+        urls_xml = "\n".join(
+            f"  <url><loc>{base_url.rstrip('/')}{s if s.startswith('/') else '/' + s}</loc><lastmod>{today}</lastmod></url>"
+            for s in slugs
+        )
+        sitemap_path.write_text(
+            f'<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n{urls_xml}\n</urlset>\n',
+            encoding="utf-8",
+        )
+        created.append("sitemap.xml")
+
+    llms_path = resolved_root / "llms.txt"
+    if not llms_path.exists():
+        llms_path.write_text(
+            f"# Site Overview\n\nURL: {base_url}\n\n## Key Pages\n"
+            + "\n".join(f"- {p.slug}: {p.title or 'Page'}" for p in pages[:10])
+            + "\n",
+            encoding="utf-8",
+        )
+        created.append("llms.txt")
+
+    return created
+
+
+def render_sarif(target: str, results: list[CheckResult]) -> str:
+    """Render audit findings as SARIF 2.1.0 JSON for GitHub Code Scanning / CI."""
+    sarif_results = []
+    for r in results:
+        if r.score >= 3:
+            continue
+        level = "error" if r.score == 0 else "warning"
+        sarif_results.append(
+            {
+                "ruleId": f"SEO-{r.id:02d}",
+                "level": level,
+                "message": {"text": f"[{r.phase}] {r.name} (score {r.score}/3): {r.notes} {r.recommendation}".strip()},
+                "locations": [{"physicalLocation": {"artifactLocation": {"uri": target}}}],
+            }
+        )
+    sarif = {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": "agency-seo-ranker",
+                        "version": "2.2.0",
+                        "informationUri": "https://github.com/deprofessorie/seo-ranker-skill",
+                    }
+                },
+                "results": sarif_results,
+            }
+        ],
+    }
+    return json.dumps(sarif, indent=2)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Agency SEO Ranker — 28-Point SEO Auditor")
     parser.add_argument("target", help="Local build directory path or http(s):// URL to audit")
     parser.add_argument("--max-pages", type=int, default=20, help="Max HTML pages to scan/crawl (default: 20)")
     parser.add_argument("--competitors", nargs="*", default=[], help="Optional competitor URLs to benchmark")
-    parser.add_argument("--format", choices=("markdown", "json"), default="markdown", help="Output format")
+    parser.add_argument("--format", choices=("markdown", "json", "sarif"), default="markdown", help="Output format")
     parser.add_argument("--output", help="Optional output file path")
     parser.add_argument("--fail-under", type=int, default=0, help="Exit with code 1 if score < threshold")
     parser.add_argument("--timeout", type=int, default=10, help="HTTP request timeout in seconds")
@@ -1152,8 +1311,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--render-js", action="store_true", help="Render SPA/JS pages via Playwright if installed")
     parser.add_argument("--lighthouse", action="store_true", help="Run Lighthouse CLI for real CWV metrics if installed")
     parser.add_argument("--pagespeed-key", default=os.environ.get("PAGESPEED_API_KEY", ""), help="Google PageSpeed Insights API key")
+    parser.add_argument("--check-external", action="store_true", help="Verify outbound HTTP(S) links and image URLs concurrently")
+    parser.add_argument("--fix", action="store_true", help="Generate missing starter robots.txt, sitemap.xml, and llms.txt in local target")
     args = parser.parse_args(argv)
 
+    created_files: list[str] = []
     try:
         if args.target.startswith(("http://", "https://")):
             site = collect_remote_site(
@@ -1169,23 +1331,41 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Error: local target '{args.target}' is not a directory.", file=sys.stderr)
                 return 2
             site = collect_local_site(root, args.max_pages)
+            if args.fix:
+                created_files = generate_starter_files(root, site["pages"])
+                if created_files:
+                    site = collect_local_site(root, args.max_pages)
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
 
+    if args.check_external:
+        site["broken_links"].extend(
+            check_external_links(site["pages"], timeout=args.timeout, allow_private=args.allow_private)
+        )
+
     competitor_summaries: list[dict[str, Any]] = []
-    for comp_url in args.competitors:
-        try:
-            competitor_summaries.append(
-                _summarize_competitor(comp_url, args.timeout, args.allow_private, args.render_js)
-            )
-        except ValueError as exc:
-            print(f"Warning: skipping competitor '{comp_url}': {exc}", file=sys.stderr)
+    if args.competitors:
+        def _run_comp(url: str) -> dict[str, Any] | None:
+            try:
+                return _summarize_competitor(url, args.timeout, args.allow_private, args.render_js)
+            except ValueError as exc:
+                print(f"Warning: skipping competitor '{url}': {exc}", file=sys.stderr)
+                return None
+
+        with ThreadPoolExecutor(max_workers=min(4, len(args.competitors))) as pool:
+            for item in pool.map(_run_comp, args.competitors):
+                if item:
+                    competitor_summaries.append(item)
 
     results = score_site(site, competitor_count=len(competitor_summaries))
+    sitemap_diff = diff_sitemap_and_pages(site["sitemap"], site["pages"])
+    content_health = detect_thin_and_duplicate_pages(site["pages"])
     total = sum(r.score for r in results)
 
-    if args.format == "json":
+    if args.format == "sarif":
+        output_text = render_sarif(args.target, results)
+    elif args.format == "json":
         payload = {
             "target": args.target,
             "pages_inspected": len(site["pages"]),
@@ -1193,12 +1373,17 @@ def main(argv: list[str] | None = None) -> int:
             "max_score": 84,
             "verdict": verdict_for(total),
             "cwv_metrics": site.get("cwv_metrics"),
+            "sitemap_diff": sitemap_diff,
+            "content_health": content_health,
+            "created_starter_files": created_files,
             "results": [asdict(r) for r in results],
             "competitors": competitor_summaries,
         }
         output_text = json.dumps(payload, indent=2)
     else:
         output_text = render_markdown(args.target, len(site["pages"]), results, competitor_summaries)
+        if created_files:
+            output_text += f"\n> Generated starter files: {', '.join(created_files)}\n"
 
     if args.output:
         Path(args.output).write_text(output_text, encoding="utf-8")

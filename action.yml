@@ -1,0 +1,35 @@
+name: Agency SEO Ranker
+description: Run the 28-point technical SEO audit on a local build directory or live URL.
+inputs:
+  target:
+    description: Local build directory (e.g. ./dist) or http(s):// URL to audit
+    required: true
+  fail-under:
+    description: Minimum SEO score (out of 84) required to pass
+    required: false
+    default: "0"
+  format:
+    description: Output format (markdown, json, or sarif)
+    required: false
+    default: "markdown"
+  output:
+    description: Optional output file path
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - name: Run Agency SEO Ranker
+      shell: bash
+      run: |
+        ARGS=("${{ inputs.target }}" "--format" "${{ inputs.format }}")
+        if [ "${{ inputs.fail-under }}" != "0" ]; then
+          ARGS+=("--fail-under" "${{ inputs.fail-under }}")
+        fi
+        if [ -n "${{ inputs.output }}" ]; then
+          ARGS+=("--output" "${{ inputs.output }}")
+        fi
+        python "${{ github.action_path }}/scripts/seo_audit.py" "${ARGS[@]}"

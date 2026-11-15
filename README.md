@@ -1,5 +1,7 @@
 # Agency SEO Ranker — Automated Technical SEO Auditor & AI Agent Skill
 
+[![SEO Ranker CI](https://github.com/deprofessorie/seo-ranker-skill/actions/workflows/test.yml/badge.svg)](https://github.com/deprofessorie/seo-ranker-skill/actions/workflows/test.yml)
+
 **A zero-dependency Python SEO audit CLI and 28-point checklist skill for AI-generated websites, static builds, and SPAs — built for Claude Code, Cursor, GitHub Copilot, Gemini CLI, Codex, and CI/CD pipelines.**
 
 AI website builders ship fast, but they routinely leave behind ranking killers: leftover `noindex` tags, duplicate `<title>`s, missing `sitemap.xml` or canonicals, broken footer links, uncompressed PNGs, skipped heading levels, and invalid JSON-LD schema.
@@ -50,10 +52,30 @@ python scripts/seo_audit.py ./dist --format json --output seo-report.json --fail
 | `--lighthouse` | Run Lighthouse CLI for real LCP, INP/FID, CLS, and performance score (optional) |
 | `--pagespeed-key KEY` | Query Google PageSpeed Insights v5 API (or set `PAGESPEED_API_KEY`) |
 | `--competitors URL ...` | Benchmark competitor URLs (score, avg words, link counts, schema types) |
-| `--format markdown\|json` | Report output format (default: `markdown`) |
+| `--format markdown\|json\|sarif` | Report output format (`sarif` for GitHub Code Scanning) |
 | `--output FILE` | Write report to a file instead of stdout |
 | `--fail-under SCORE` | Exit with code `1` if total score is below `SCORE` |
+| `--check-external` | Concurrently verify outbound HTTP(S) links and image URLs |
+| `--fix` | Generate missing starter `robots.txt`, `sitemap.xml`, and `llms.txt` in local target |
 | `--allow-private` | Opt-in to audit `localhost` / private network targets (blocked by default) |
+
+### Install via `pipx` / `uvx` or GitHub Action
+
+```bash
+# Run directly without cloning (once published) or from local checkout
+pipx install .
+seo-audit ./dist --fix --fail-under 60
+```
+
+```yaml
+# .github/workflows/seo.yml
+- uses: deprofessorie/seo-ranker-skill@main
+  with:
+    target: ./dist
+    format: sarif
+    output: seo.sarif
+    fail-under: "60"
+```
 
 ## Supported agents
 

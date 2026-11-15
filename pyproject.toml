@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agency-seo-ranker"
+version = "2.2.0"
+description = "Zero-dependency 28-point technical SEO auditor CLI and AI agent skill."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+browser = ["playwright>=1.40"]
+
+[project.scripts]
+seo-audit = "seo_audit:main"
+
+[tool.setuptools]
+package-dir = { "" = "scripts" }
+py-modules = ["seo_audit"]

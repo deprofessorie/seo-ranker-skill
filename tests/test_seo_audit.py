@@ -193,6 +193,34 @@ class TestSEOAudit(unittest.TestCase):
         self.assertEqual(res.score, 3)
         self.assertIn("LCP=1850ms", res.notes)
 
+    def test_fix_starter_files_and_sarif_and_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "index.html").write_text(GOOD_HTML, encoding="utf-8")
+            (root / "dup.html").write_text(GOOD_HTML, encoding="utf-8")
+            sarif_out = root / "seo.sarif"
+
+            code = seo_audit.main([str(root), "--fix", "--format", "sarif", "--output", str(sarif_out)])
+            self.assertEqual(code, 0)
+            self.assertTrue((root / "robots.txt").is_file())
+            self.assertTrue((root / "sitemap.xml").is_file())
+            self.assertTrue((root / "llms.txt").is_file())
+
+            sarif = json.loads(sarif_out.read_text(encoding="utf-8"))
+            self.assertEqual(sarif["version"], "2.1.0")
+            self.assertTrue(len(sarif["runs"][0]["results"]) > 0)
+
+            site = seo_audit.collect_local_site(root, max_pages=10)
+            health = seo_audit.detect_thin_and_duplicate_pages(site["pages"], min_words=150)
+            self.assertEqual(len(health["duplicate_pages"]), 1)
+            self.assertTrue(len(health["thin_pages"]) >= 1)
+
+            diff = seo_audit.diff_sitemap_and_pages(
+                '<urlset><url><loc>https://example.com/orphan</loc></url></urlset>',
+                site["pages"],
+            )
+            self.assertIn("/orphan", diff["orphan_pages"])
+
 
 if __name__ == "__main__":
     unittest.main()
