@@ -1,34 +1,59 @@
-# Agency SEO Ranker
+# Agency SEO Ranker — Automated Technical SEO Auditor & AI Agent Skill
 
-**28-point SEO audit checklist & automated CLI auditor for AI-generated websites — works across any AI agent.**
+**A zero-dependency Python SEO audit CLI and 28-point checklist skill for AI-generated websites, static builds, and SPAs — built for Claude Code, Cursor, GitHub Copilot, Gemini CLI, Codex, and CI/CD pipelines.**
 
-Diagnose crawlability, on-page signals, Core Web Vitals, legal compliance, and competitive positioning, then remediate with confidence. Works in Claude Code, Cursor, GitHub Copilot, Gemini CLI, Codex, OpenCode, and any agent that reads instruction files.
+AI website builders ship fast, but they routinely leave behind ranking killers: leftover `noindex` tags, duplicate `<title>`s, missing `sitemap.xml` or canonicals, broken footer links, uncompressed PNGs, skipped heading levels, and invalid JSON-LD schema.
+
+**Agency SEO Ranker** fixes that in one pass. It combines a deterministic Python 3 auditor (`scripts/seo_audit.py`) with a phased 28-point remediation workflow (`SKILL.md`), optional Playwright SPA rendering, real Google Lighthouse / PageSpeed Insights Core Web Vitals, and side-by-side competitor benchmarking.
 
 ```
 you: "audit this AI-built site"
         │
-        ├─ phase 1 → sitemap + robots + noindex + canonicals
-        ├─ phase 2 → meta titles, internal links, broken links
-        ├─ phase 3 → image compression, CWV, mobile layout
-        ├─ phase 4 → headings, slugs, OG tags, schema
-        ├─ phase 5 → llms.txt, contact, footer, policies
-        ├─ phase 6 → humanized content, Apple/Google design
-        └─ phase 7 → competitor analysis & ranking strategy
+        ├─ phase 1 → sitemap + robots + noindex + canonicals + hreflang
+        ├─ phase 2 → meta titles/descriptions, internal links, broken links
+        ├─ phase 3 → image compression, Core Web Vitals (LCP/INP/CLS), mobile
+        ├─ phase 4 → headings, URL slugs, OG tags, alt text, GSC, JSON-LD schema
+        ├─ phase 5 → llms.txt, contact, footer, privacy/cookie policies, AI slugs
+        ├─ phase 6 → humanized prose, Apple HIG, Material 3, accessibility
+        └─ phase 7 → competitor technical & content gap benchmarking
 ```
 
-Score each item 0–3. Total: 84. Anything below 50 needs serious work.
+Score each item **0–3** (max **84**). Anything below **50** needs major work.
+
+## Why Use This Over Prompt-Only SEO Skills?
+
+- **Zero dependencies by default:** Runs on pure Python 3 stdlib (`html.parser`, `xml.etree.ElementTree`, `urllib`) — no `pip install` or `npm install` required for static/HTML audits.
+- **Optional real browser & CWV:** Pass `--render-js` for Playwright SPA rendering, `--lighthouse` for local Lighthouse Core Web Vitals, or `--pagespeed-key` for Google PageSpeed Insights v5 metrics.
+- **CI/CD ready:** Use `--format json` and `--fail-under 60` to block deployments that regress SEO basics.
+- **Hardened by design:** Redirect-safe SSRF protection (`SafeRedirectHandler`), Playwright sub-request route guards, local symlink traversal checks, and Markdown table escaping.
 
 ## Automated CLI Auditor
 
-Run deterministic checks with zero external dependencies (Python 3 stdlib only):
-
 ```bash
-# Local build directory
+# 1. Audit a local build folder (dist/, out/, public/, or .)
 python scripts/seo_audit.py ./dist
 
-# Live URL + JS rendering (Playwright) + real CWV (Lighthouse) + competitor benchmark
-python scripts/seo_audit.py https://example.com --render-js --lighthouse --competitors https://comp1.com --format json
+# 2. Audit a live site with SPA rendering, Lighthouse CWV, and competitor benchmarking
+python scripts/seo_audit.py https://example.com --render-js --lighthouse --competitors https://comp1.com https://comp2.com
+
+# 3. CI/CD gate: output JSON and fail build if score < 60/84
+python scripts/seo_audit.py ./dist --format json --output seo-report.json --fail-under 60
 ```
+
+### CLI Options
+
+| Flag | Description |
+|------|-------------|
+| `target` | Local build directory path or `http(s)://` URL |
+| `--max-pages N` | Maximum HTML pages to scan/crawl (default: `20`) |
+| `--render-js` | Render client-side JS/SPAs using Playwright Chromium (optional) |
+| `--lighthouse` | Run Lighthouse CLI for real LCP, INP/FID, CLS, and performance score (optional) |
+| `--pagespeed-key KEY` | Query Google PageSpeed Insights v5 API (or set `PAGESPEED_API_KEY`) |
+| `--competitors URL ...` | Benchmark competitor URLs (score, avg words, link counts, schema types) |
+| `--format markdown\|json` | Report output format (default: `markdown`) |
+| `--output FILE` | Write report to a file instead of stdout |
+| `--fail-under SCORE` | Exit with code `1` if total score is below `SCORE` |
+| `--allow-private` | Opt-in to audit `localhost` / private network targets (blocked by default) |
 
 ## Supported agents
 
