@@ -2,11 +2,23 @@
 
 ## Running an audit on an AI-built website
 
-1. Open the project folder in Claude Code.
+### Automated CLI (zero dependencies)
+
+```bash
+# Audit a local build folder (dist/, out/, public/, or .)
+python scripts/seo_audit.py ./dist
+
+# Audit a live site + competitors and fail CI if score < 60
+python scripts/seo_audit.py https://example.com --competitors https://comp1.com --fail-under 60
+```
+
+### Agent workflow
+
+1. Open the project folder in Claude Code (or any supported agent).
 2. Type `/agency-seo-ranker`.
-3. Provide the target URL or point Claude at the project root.
-4. Claude runs all 29 checks across 7 phases and returns:
-   - Scorecard table (all 29 items scored 0–3)
+3. Provide the target URL or point the agent at the project root.
+4. The agent runs `scripts/seo_audit.py` + all 28 checks across 7 phases and returns:
+   - Scorecard table (all 28 items scored 0–3, max 84)
    - Prioritized fix list (highest-impact first)
    - Before/after evidence snippets
    - 30-day improvement plan

@@ -1,6 +1,6 @@
 # Codex / OpenAI Agent Instructions
 
-See [SKILL.md](./SKILL.md) for the full 29-point SEO audit checklist.
+See [SKILL.md](./SKILL.md) for the full 28-point SEO audit checklist, or run `python scripts/seo_audit.py <target>` for an automated baseline audit.
 
 ## Quick reference
 
@@ -16,8 +16,8 @@ See [SKILL.md](./SKILL.md) for the full 29-point SEO audit checklist.
 
 ## Scoring
 
-Each item: 0 (not implemented) – 3 (fully validated). Max total: 87.
-Below 52 = needs major work. Below 26 = critical.
+Each item: 0 (not implemented) – 3 (fully validated). Max total: 84.
+Below 50 = needs major work. Below 25 = critical.
 
 ## Top 4 quick wins
 

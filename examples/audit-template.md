@@ -42,7 +42,7 @@ Use this template after running the `/agency-seo-ranker` skill on a site.
 | 27 | Modern UI/UX implementation | | 🔴🟡🟢 | |
 | 28 | Check competitors & rank | | 🔴🟡🟢 | |
 
-**Total score**: ___ / 87
+**Total score**: ___ / 84
 
 **Verdict**: [Excellent / Good / Poor / Critical]
 
@@ -74,4 +74,4 @@ Ordered by impact × ease. Address top items first.
 | 3 | Performance + HTML | #8–#17 | +8 pts |
 | 4 | Trust signals + competition | #18–#28 | +6 pts |
 
-Target post-audit score: **___ / 87**
+Target post-audit score: **___ / 84**

@@ -1,6 +1,6 @@
 # Agency SEO Ranker
 
-**29-point SEO audit checklist for AI-generated websites — works across any AI agent.**
+**28-point SEO audit checklist & automated CLI auditor for AI-generated websites — works across any AI agent.**
 
 Diagnose crawlability, on-page signals, Core Web Vitals, legal compliance, and competitive positioning, then remediate with confidence. Works in Claude Code, Cursor, GitHub Copilot, Gemini CLI, Codex, OpenCode, and any agent that reads instruction files.
 
@@ -16,14 +16,26 @@ you: "audit this AI-built site"
         └─ phase 7 → competitor analysis & ranking strategy
 ```
 
-Score each item 0–3. Total: 87. Anything below 52 needs serious work.
+Score each item 0–3. Total: 84. Anything below 50 needs serious work.
+
+## Automated CLI Auditor
+
+Run deterministic checks with zero external dependencies (Python 3 stdlib only):
+
+```bash
+# Local build directory
+python scripts/seo_audit.py ./dist
+
+# Live URL + competitor benchmark + JSON output
+python scripts/seo_audit.py https://example.com --competitors https://comp1.com --format json
+```
 
 ## Supported agents
 
 | Agent | Adapter file | How it loads |
 |-------|-------------|--------------|
 | **Claude Code** | [SKILL.md](./SKILL.md) | `/agency-seo-ranker` or auto-detected |
-| **Cursor** | [adapters/cursor/agency-seo-ranker.mdc](./adapters/cursor/agency-seo-ranker.mdc) | `alwaysApply: true` — runs in every chat |
+| **Cursor** | [adapters/cursor/agency-seo-ranker.mdc](./adapters/cursor/agency-seo-ranker.mdc) | `alwaysApply: false` — activates via globs/description for web & SEO tasks |
 | **GitHub Copilot** | [.github/copilot-instructions.md](./.github/copilot-instructions.md) | Picked up from `.github/` in the workspace |
 | **Gemini CLI** | [.gemini/AGENTS.md](./.gemini/AGENTS.md) | Loaded as project agent instructions |
 | **Codex / OpenCode** | [AGENTS.md](./AGENTS.md) | Read as general-purpose agent instructions |
@@ -45,7 +57,7 @@ Then type `/agency-seo-ranker` in any chat.
 
 ### Cursor
 
-Place the repo (or just the `adapters/cursor/` folder) inside your project. Cursor picks up `.mdc` files automatically. The skill applies to all chats via `alwaysApply: true`.
+Place the repo (or just the `adapters/cursor/` folder) inside your project. Cursor picks up `.mdc` files automatically for matching web/SEO files (`alwaysApply: false`).
 
 ### GitHub Copilot
 
@@ -59,7 +71,7 @@ Copy [`.gemini/AGENTS.md`](./.gemini/AGENTS.md) into your project's `.gemini/AGE
 
 Copy [AGENTS.md](./AGENTS.md) to the project root. These agents read it as general instruction context.
 
-## The 29-item checklist at a glance
+## The 28-item checklist at a glance
 
 | # | Item | Phase | Impact |
 |---|------|-------|--------|
@@ -105,27 +117,31 @@ Each item scores **0–3**:
 | 2 | Implemented with minor issues |
 | 3 | Fully implemented, validated |
 
-**Total possible: 87**
+**Total possible: 84**
 
 | Range | Verdict |
 |-------|---------|
-| 78–87 | Excellent — ready to compete |
-| 52–77 | Good — fix top 3 lowest-scoring items |
-| 26–51 | Poor — major SEO overhaul needed |
-| 0–25 | Critical — site will not rank without intervention |
+| 76–84 | Excellent — ready to compete |
+| 50–75 | Good — fix top 3 lowest-scoring items |
+| 25–49 | Poor — major SEO overhaul needed |
+| 0–24 | Critical — site will not rank without intervention |
 
 ## Repo structure
 
 ```
 seo-ranker-skill/
-├── SKILL.md                      # Source of truth — full 29-item checklist
+├── SKILL.md                      # Source of truth — full 28-item checklist
 ├── README.md                     # This file
 ├── AGENTS.md                     # Codex / OpenCode generic instructions
 ├── LICENSE                       # MIT
+├── scripts/
+│   └── seo_audit.py              # Zero-dependency 28-point CLI auditor
+├── tests/
+│   └── test_seo_audit.py         # Unit tests for local & edge-case audits
 ├── adapters/
 │   ├── bootstrap.md              # Always-on bootstrap marker
 │   └── cursor/
-│       └── agency-seo-ranker.mdc # Cursor .mdc adapter (alwaysApply)
+│       └── agency-seo-ranker.mdc # Cursor .mdc adapter (glob-scoped)
 ├── .github/
 │   └── copilot-instructions.md   # GitHub Copilot hook
 ├── .gemini/

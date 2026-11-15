@@ -8,9 +8,10 @@ When the user asks about SEO, rankings, site audits, or Google visibility for an
 
 ## Workflow
 
-1. Read [SKILL.md](../SKILL.md) once. It contains the complete 29-item checklist organized into 7 phases.
-2. Audit each phase in order. Do not skip Phase 1 (crawlability).
-3. Score every item 0–3 (max 87 points).
+1. Read [SKILL.md](../SKILL.md) once. It contains the complete 28-item checklist organized into 7 phases.
+2. Run `python scripts/seo_audit.py <target>` for an automated baseline scorecard.
+3. Audit each phase in order. Do not skip Phase 1 (crawlability).
+4. Score every item 0–3 (max 84 points).
 4. Output:
    - Scorecard table
    - Prioritized fix list
