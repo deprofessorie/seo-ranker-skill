@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Agency SEO Ranker — Automated 28-Point SEO Auditor (v2.0.0)
+Agency SEO Ranker — Automated 28-Point SEO Auditor (v2.1.0)
 
 Audits a local website build directory or a live HTTP(S) URL against the
 28-point Agency SEO Ranker checklist (max score: 84), producing a scored
-Markdown or JSON report. Uses only the Python 3 standard library.
+Markdown or JSON report. Uses only the Python 3 standard library by default,
+with optional Playwright (--render-js), Lighthouse CLI (--lighthouse), and
+Google PageSpeed Insights API (--pagespeed-key) integrations.
 """
 
 from __future__ import annotations
@@ -14,8 +16,11 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import socket
+import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -50,7 +55,7 @@ GENERIC_ALT_WORDS = {"image", "photo", "picture", "img", "banner", "icon", "logo
 GENERIC_TITLES = {"home", "welcome", "index", "untitled", "document", "react app", "vite app"}
 STOP_WORDS = {"a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with"}
 
-USER_AGENT = "AgencySEORanker/2.0 (+https://github.com/deprofessorie/seo-ranker-skill)"
+USER_AGENT = "AgencySEORanker/2.1 (+https://github.com/deprofessorie/seo-ranker-skill)"
 
 
 @dataclass
@@ -65,6 +70,7 @@ class PageData:
     lang: str = ""
     viewport: str = ""
     canonical: str = ""
+    hreflangs: list[str] = field(default_factory=list)
     robots_meta: list[str] = field(default_factory=list)
     gsc_verification: bool = False
     og_tags: dict[str, str] = field(default_factory=dict)
@@ -78,6 +84,7 @@ class PageData:
     has_dark_mode_hint: bool = False
     has_aria_or_skip: bool = False
     body_text: str = ""
+    redirect_hops: int = 0
 
 
 @dataclass
@@ -123,6 +130,7 @@ class SEOHTMLParser(HTMLParser):
         self.lang = ""
         self.viewport = ""
         self.canonical = ""
+        self.hreflangs: list[str] = []
         self.meta_description = ""
         self.robots_meta: list[str] = []
         self.gsc_verification = False
@@ -161,6 +169,8 @@ class SEOHTMLParser(HTMLParser):
             href = attr_map.get("href", "").strip()
             if "canonical" in rel and href and not self.canonical:
                 self.canonical = href
+            if "alternate" in rel and attr_map.get("hreflang") and href:
+                self.hreflangs.append(attr_map["hreflang"].strip().lower())
         elif tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
             self.current_heading_level = int(tag[1])
             self.heading_buf = []
@@ -256,7 +266,13 @@ class SEOHTMLParser(HTMLParser):
             self.body_text_parts.append(data)
 
 
-def parse_html(html: str, url_or_path: str, slug: str, status_code: int | None = None) -> PageData:
+def parse_html(
+    html: str,
+    url_or_path: str,
+    slug: str,
+    status_code: int | None = None,
+    redirect_hops: int = 0,
+) -> PageData:
     """Parse HTML string into a PageData object."""
     parser = SEOHTMLParser()
     parser.feed(html)
@@ -270,6 +286,7 @@ def parse_html(html: str, url_or_path: str, slug: str, status_code: int | None =
         lang=parser.lang,
         viewport=parser.viewport,
         canonical=parser.canonical,
+        hreflangs=parser.hreflangs,
         robots_meta=parser.robots_meta,
         gsc_verification=parser.gsc_verification,
         og_tags=parser.og_tags,
@@ -283,6 +300,7 @@ def parse_html(html: str, url_or_path: str, slug: str, status_code: int | None =
         has_dark_mode_hint=parser.has_dark_mode_hint,
         has_aria_or_skip=parser.has_aria_or_skip,
         body_text=" ".join("".join(parser.body_text_parts).split()),
+        redirect_hops=redirect_hops,
     )
 
 
@@ -316,52 +334,171 @@ def validate_url(url: str, allow_private: bool = False) -> str:
     return url
 
 
-def fetch_url(url: str, timeout: int = 10, allow_private: bool = False) -> tuple[int, dict[str, str], str]:
-    """Fetch a URL safely and return (status_code, lowercased_headers, body_text)."""
+class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """HTTPRedirectHandler that enforces validate_url on every redirect hop."""
+
+    def __init__(self, allow_private: bool = False, max_hops: int = 5) -> None:
+        super().__init__()
+        self.allow_private = allow_private
+        self.max_hops = max_hops
+        self.hops: int = 0
+
+    def redirect_request(self, req: urllib.request.Request, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> Any:
+        self.hops += 1
+        if self.hops > self.max_hops:
+            raise urllib.error.HTTPError(newurl, code, "Too many redirects", headers, fp)
+        validate_url(newurl, allow_private=self.allow_private)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def fetch_url(url: str, timeout: int = 10, allow_private: bool = False) -> tuple[int, dict[str, str], str, int]:
+    """Fetch a URL safely with redirect SSRF validation; return (status, headers, body, redirect_hops)."""
     validate_url(url, allow_private=allow_private)
+    redirect_handler = SafeRedirectHandler(allow_private=allow_private)
+    opener = urllib.request.build_opener(redirect_handler)
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with opener.open(req, timeout=timeout) as resp:
             headers = {k.lower(): v for k, v in resp.headers.items()}
             raw = resp.read(2_000_000)  # Cap at 2 MB per page
             charset = resp.headers.get_content_charset() or "utf-8"
-            return resp.status, headers, raw.decode(charset, errors="replace")
+            return resp.status, headers, raw.decode(charset, errors="replace"), redirect_handler.hops
     except urllib.error.HTTPError as err:
-        return err.code, {k.lower(): v for k, v in err.headers.items()}, ""
-    except urllib.error.URLError:
-        return 0, {}, ""
+        return err.code, {k.lower(): v for k, v in err.headers.items()}, "", redirect_handler.hops
+    except (urllib.error.URLError, ValueError):
+        return 0, {}, "", redirect_handler.hops
+
+
+def render_with_playwright(url: str, timeout: int = 15, allow_private: bool = False) -> str | None:
+    """Optionally render a JS/SPA page using Playwright Chromium if installed."""
+    validate_url(url, allow_private=allow_private)
+    try:
+        from playwright.sync_api import sync_playwright  # type: ignore[import-not-found]
+    except ImportError:
+        return None
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        try:
+            context = browser.new_context(user_agent=USER_AGENT)
+            page = context.new_page()
+
+            def _route_guard(route: Any) -> None:
+                try:
+                    validate_url(route.request.url, allow_private=allow_private)
+                    route.continue_()
+                except ValueError:
+                    route.abort()
+
+            page.route("**/*", _route_guard)
+            page.goto(url, wait_until="networkidle", timeout=timeout * 1000)
+            return page.content()
+        finally:
+            browser.close()
+
+
+def parse_lighthouse_metrics(lhr: dict[str, Any]) -> dict[str, Any]:
+    """Extract Core Web Vitals and performance score from a Lighthouse JSON report."""
+    audits = lhr.get("audits", {})
+    categories = lhr.get("categories", {})
+    perf_score = categories.get("performance", {}).get("score")
+    lcp_ms = audits.get("largest-contentful-paint", {}).get("numericValue")
+    inp_ms = (
+        audits.get("interaction-to-next-paint", {}).get("numericValue")
+        or audits.get("max-potential-fid", {}).get("numericValue")
+    )
+    cls_val = audits.get("cumulative-layout-shift", {}).get("numericValue")
+    return {
+        "performance_score": round(perf_score * 100) if isinstance(perf_score, (int, float)) else None,
+        "lcp_ms": round(lcp_ms) if isinstance(lcp_ms, (int, float)) else None,
+        "inp_ms": round(inp_ms) if isinstance(inp_ms, (int, float)) else None,
+        "cls": round(cls_val, 3) if isinstance(cls_val, (int, float)) else None,
+    }
+
+
+def run_lighthouse(url: str, timeout: int = 45, allow_private: bool = False) -> dict[str, Any] | None:
+    """Optionally run Lighthouse CLI on a URL and return parsed CWV metrics."""
+    validate_url(url, allow_private=allow_private)
+    exe = shutil.which("lighthouse")
+    if exe:
+        base_cmd = [exe]
+    elif shutil.which("npx"):
+        base_cmd = ["npx", "--yes", "lighthouse"]
+    else:
+        return None
+
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+        out_path = Path(tmp.name)
+    try:
+        cmd = [
+            *base_cmd,
+            url,
+            "--output=json",
+            f"--output-path={out_path}",
+            "--quiet",
+            "--only-categories=performance",
+            '--chrome-flags=--headless --no-sandbox',
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+        if proc.returncode != 0 or not out_path.is_file() or out_path.stat().st_size == 0:
+            return None
+        lhr = json.loads(out_path.read_text(encoding="utf-8", errors="replace"))
+        return parse_lighthouse_metrics(lhr)
+    except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
+        return None
+    finally:
+        out_path.unlink(missing_ok=True)
+
+
+def run_pagespeed_insights(url: str, api_key: str, timeout: int = 30) -> dict[str, Any] | None:
+    """Query Google PageSpeed Insights v5 API for real-world Lighthouse CWV metrics."""
+    validate_url(url, allow_private=False)
+    qs = urllib.parse.urlencode({"url": url, "strategy": "mobile", "category": "performance", "key": api_key})
+    endpoint = f"https://www.googleapis.com/pagespeedonline/v5/runPagespeed?{qs}"
+    status, _, body, _ = fetch_url(endpoint, timeout=timeout, allow_private=False)
+    if status != 200 or not body:
+        return None
+    try:
+        data = json.loads(body)
+        return parse_lighthouse_metrics(data.get("lighthouseResult", {}))
+    except json.JSONDecodeError:
+        return None
 
 
 def collect_local_site(root: Path, max_pages: int) -> dict[str, Any]:
     """Scan a local directory for HTML files, sitemap.xml, robots.txt, llms.txt, and images."""
+    resolved_root = root.resolve()
     skip_dirs = {"node_modules", ".git", ".next", ".venv", "venv", "__pycache__"}
     html_files: list[Path] = []
     image_sizes: list[tuple[str, int]] = []
 
-    for dirpath, dirnames, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(resolved_root, followlinks=False):
         dirnames[:] = [d for d in dirnames if d not in skip_dirs]
         for fname in filenames:
             fpath = Path(dirpath) / fname
+            try:
+                resolved_file = fpath.resolve()
+                if not resolved_file.is_relative_to(resolved_root):
+                    continue
+            except OSError:
+                continue
             ext = fpath.suffix.lower()
             if ext in (".html", ".htm"):
-                html_files.append(fpath)
+                html_files.append(resolved_file)
             elif ext in (".png", ".jpg", ".jpeg", ".webp", ".avif", ".gif", ".svg"):
-                image_sizes.append((str(fpath.relative_to(root)), fpath.stat().st_size))
+                image_sizes.append((str(resolved_file.relative_to(resolved_root)), resolved_file.stat().st_size))
 
     html_files.sort()
     pages: list[PageData] = []
     for fpath in html_files[:max_pages]:
-        rel = "/" + str(fpath.relative_to(root)).replace("\\", "/")
-        if rel.endswith("/index.html"):
-            slug = rel[: -len("index.html")] or "/"
-        else:
-            slug = rel
+        rel = "/" + str(fpath.relative_to(resolved_root)).replace("\\", "/")
+        slug = rel[: -len("index.html")] or "/" if rel.endswith("/index.html") else rel
         text = fpath.read_text(encoding="utf-8", errors="replace")
         pages.append(parse_html(text, str(fpath), slug, status_code=200))
 
     def _read_optional(name: str) -> str | None:
-        for candidate in (root / name, root / "public" / name):
-            if candidate.is_file():
+        for candidate in (resolved_root / name, resolved_root / "public" / name):
+            if candidate.is_file() and candidate.resolve().is_relative_to(resolved_root):
                 return candidate.read_text(encoding="utf-8", errors="replace")
         return None
 
@@ -373,8 +510,9 @@ def collect_local_site(root: Path, max_pages: int) -> dict[str, Any]:
         "robots": _read_optional("robots.txt"),
         "llms": _read_optional("llms.txt"),
         "image_sizes": image_sizes,
-        "broken_links": _check_local_links(root, pages),
+        "broken_links": _check_local_links(resolved_root, pages),
         "x_robots_noindex": False,
+        "cwv_metrics": None,
     }
 
 
@@ -396,7 +534,13 @@ def _check_local_links(root: Path, pages: list[PageData]) -> list[str]:
     return broken
 
 
-def collect_remote_site(base_url: str, max_pages: int, timeout: int, allow_private: bool) -> dict[str, Any]:
+def collect_remote_site(
+    base_url: str,
+    max_pages: int,
+    timeout: int,
+    allow_private: bool,
+    render_js: bool = False,
+) -> dict[str, Any]:
     """Crawl a live HTTP(S) site up to max_pages and fetch sitemap.xml, robots.txt, and llms.txt."""
     parsed_base = urllib.parse.urlparse(validate_url(base_url, allow_private=allow_private))
     origin = f"{parsed_base.scheme}://{parsed_base.netloc}"
@@ -414,15 +558,20 @@ def collect_remote_site(base_url: str, max_pages: int, timeout: int, allow_priva
             continue
         visited.add(norm)
 
-        status, headers, body = fetch_url(current, timeout=timeout, allow_private=allow_private)
+        status, headers, body, hops = fetch_url(current, timeout=timeout, allow_private=allow_private)
         if "noindex" in headers.get("x-robots-tag", "").lower():
             x_robots_noindex = True
         if status >= 400 or status == 0:
             broken_links.append(f"{current} (HTTP {status})")
             continue
 
+        if render_js:
+            rendered = render_with_playwright(current, timeout=timeout + 5, allow_private=allow_private)
+            if rendered:
+                body = rendered
+
         slug = urllib.parse.urlparse(current).path or "/"
-        page = parse_html(body, current, slug, status_code=status)
+        page = parse_html(body, current, slug, status_code=status, redirect_hops=hops)
         pages.append(page)
 
         for link in page.links:
@@ -437,7 +586,7 @@ def collect_remote_site(base_url: str, max_pages: int, timeout: int, allow_priva
                     queue.append(resolved)
 
     def _fetch_root_file(path: str) -> str | None:
-        st, _, text = fetch_url(f"{origin}/{path}", timeout=timeout, allow_private=allow_private)
+        st, _, text, _ = fetch_url(f"{origin}/{path}", timeout=timeout, allow_private=allow_private)
         return text if st == 200 and text.strip() else None
 
     return {
@@ -450,6 +599,7 @@ def collect_remote_site(base_url: str, max_pages: int, timeout: int, allow_priva
         "image_sizes": [],
         "broken_links": broken_links,
         "x_robots_noindex": x_robots_noindex,
+        "cwv_metrics": None,
     }
 
 
@@ -499,29 +649,39 @@ def _score_canonical(pages: list[PageData]) -> CheckResult:
         return CheckResult(4, "Add canonical tags", "Crawlability", 0, "Critical", "No HTML pages found.")
     canonicals = [p.canonical for p in pages]
     missing = sum(1 for c in canonicals if not c)
+    hreflang_pages = sum(1 for p in pages if p.hreflangs)
+    multi_hop = [p.slug for p in pages if p.redirect_hops > 1]
+    extra = f" hreflang_pages={hreflang_pages}/{len(pages)}" if hreflang_pages else ""
+    if multi_hop:
+        extra += f", redirect_chains={len(multi_hop)}"
     if missing == len(pages):
-        return CheckResult(4, "Add canonical tags", "Crawlability", 0, "Critical", "No <link rel='canonical'> tags found.", "Add self-referencing canonical tag to every page.")
+        return CheckResult(4, "Add canonical tags", "Crawlability", 0, "Critical", f"No <link rel='canonical'> tags found.{extra}", "Add self-referencing canonical tag to every page.")
     non_empty = [c for c in canonicals if c]
     if missing > 0 or (len(pages) > 1 and len(set(non_empty)) == 1):
-        return CheckResult(4, "Add canonical tags", "Crawlability", 1, "Critical", f"Missing on {missing}/{len(pages)} pages or hardcoded identical canonical.", "Ensure every page has a unique, self-referencing canonical URL.")
-    return CheckResult(4, "Add canonical tags", "Crawlability", 3, "Critical", "All audited pages have unique canonical tags.", "")
+        return CheckResult(4, "Add canonical tags", "Crawlability", 1, "Critical", f"Missing on {missing}/{len(pages)} pages or hardcoded identical canonical.{extra}", "Ensure every page has a unique, self-referencing canonical URL.")
+    if multi_hop:
+        return CheckResult(4, "Add canonical tags", "Crawlability", 2, "Critical", f"Canonicals present, but multi-hop redirects detected on {len(multi_hop)} page(s).{extra}", "Point internal links and canonicals directly to final 200 URLs.")
+    return CheckResult(4, "Add canonical tags", "Crawlability", 3, "Critical", f"All audited pages have unique canonical tags.{extra}", "")
 
 
 def _score_titles(pages: list[PageData]) -> CheckResult:
     if not pages:
-        return CheckResult(5, "Add meta titles", "On-Page Meta", 0, "High", "No HTML pages found.")
+        return CheckResult(5, "Add meta titles & descriptions", "On-Page Meta", 0, "High", "No HTML pages found.")
     titles = [p.title for p in pages]
-    missing = sum(1 for t in titles if not t)
-    if missing == len(pages):
-        return CheckResult(5, "Add meta titles", "On-Page Meta", 0, "High", "All pages missing <title>.", "Add unique 50-60 char <title> tags.")
+    descs = [p.meta_description for p in pages]
+    missing_t = sum(1 for t in titles if not t)
+    missing_d = sum(1 for d in descs if not d)
+    if missing_t == len(pages):
+        return CheckResult(5, "Add meta titles & descriptions", "On-Page Meta", 0, "High", "All pages missing <title>.", "Add unique 50-60 char <title> and 120-160 char meta description.")
     generic = [t for t in titles if t.lower() in GENERIC_TITLES]
     bad_len = [t for t in titles if t and (len(t) < 20 or len(t) > 70)]
-    dupes = len([t for t in titles if t]) != len(set(t for t in titles if t))
-    if missing > 0 or generic or dupes:
-        return CheckResult(5, "Add meta titles", "On-Page Meta", 1, "High", f"Missing={missing}, dupes={dupes}, generic={len(generic)}.", "Make every <title> unique, descriptive, and 50-60 chars.")
-    if bad_len:
-        return CheckResult(5, "Add meta titles", "On-Page Meta", 2, "High", f"{len(bad_len)} title(s) outside 20-70 chars.", "Tighten titles to 50-60 characters.")
-    return CheckResult(5, "Add meta titles", "On-Page Meta", 3, "High", "Unique, well-sized <title> tags on all pages.", "")
+    dupes_t = len([t for t in titles if t]) != len(set(t for t in titles if t))
+    dupes_d = len([d for d in descs if d]) != len(set(d for d in descs if d))
+    if missing_t > 0 or generic or dupes_t:
+        return CheckResult(5, "Add meta titles & descriptions", "On-Page Meta", 1, "High", f"missing_title={missing_t}, dupes={dupes_t}, generic={len(generic)}, missing_desc={missing_d}.", "Make every <title> unique (50-60 chars) and add unique meta descriptions.")
+    if bad_len or missing_d > 0 or dupes_d:
+        return CheckResult(5, "Add meta titles & descriptions", "On-Page Meta", 2, "High", f"bad_title_len={len(bad_len)}, missing_desc={missing_d}, dup_desc={dupes_d}.", "Tighten titles to 50-60 chars and add unique 120-160 char meta descriptions.")
+    return CheckResult(5, "Add meta titles & descriptions", "On-Page Meta", 3, "High", "Unique, well-sized <title> and meta description on all pages.", "")
 
 
 def _score_internal_links(pages: list[PageData]) -> CheckResult:
@@ -559,17 +719,29 @@ def _score_images(pages: list[PageData], image_sizes: list[tuple[str, int]]) -> 
     return CheckResult(8, "Compress images", "Performance", 3, "High", "Images use modern formats and reasonable sizes.", "")
 
 
-def _score_cwv(pages: list[PageData]) -> CheckResult:
+def _score_cwv(pages: list[PageData], cwv_metrics: dict[str, Any] | None = None) -> CheckResult:
+    if cwv_metrics and cwv_metrics.get("lcp_ms") is not None:
+        lcp = cwv_metrics["lcp_ms"]
+        inp = cwv_metrics.get("inp_ms") or 0
+        cls_val = cwv_metrics.get("cls") or 0.0
+        perf = cwv_metrics.get("performance_score")
+        good = lcp <= 2500 and inp <= 200 and cls_val <= 0.1
+        poor = lcp > 4000 or inp > 500 or cls_val > 0.25
+        score = 3 if good else (1 if poor else 2)
+        notes = f"Lighthouse perf={perf}, LCP={lcp}ms, INP/FID={inp}ms, CLS={cls_val}."
+        rec = "" if good else "Optimize LCP <=2500ms, INP <=200ms, CLS <=0.1."
+        return CheckResult(9, "Core Web Vitals", "Performance", score, "High", notes, rec)
+
     if not pages:
         return CheckResult(9, "Core Web Vitals", "Performance", 0, "High", "No HTML pages found.")
     imgs = [img for p in pages for img in p.images]
     missing_dims = sum(1 for img in imgs if not img["width"] or not img["height"])
     blocking = sum(p.blocking_scripts_in_head for p in pages)
     if blocking > 0 and missing_dims > 0:
-        return CheckResult(9, "Core Web Vitals", "Performance", 1, "High", f"{blocking} render-blocking <script> in <head>; {missing_dims} <img> missing width/height.", "Add defer/async to scripts and explicit width/height to images; verify with Lighthouse.")
+        return CheckResult(9, "Core Web Vitals", "Performance", 1, "High", f"{blocking} render-blocking <script> in <head>; {missing_dims} <img> missing width/height.", "Add defer/async to scripts and explicit width/height to images; run --lighthouse.")
     if blocking > 0 or missing_dims > 0:
-        return CheckResult(9, "Core Web Vitals", "Performance", 2, "High", f"blocking_scripts={blocking}, imgs_without_dims={missing_dims}.", "Fix remaining CLS/INP hints and run Lighthouse CI.")
-    return CheckResult(9, "Core Web Vitals", "Performance", 3, "High", "No render-blocking head scripts or unsized images detected (confirm with Lighthouse).", "")
+        return CheckResult(9, "Core Web Vitals", "Performance", 2, "High", f"blocking_scripts={blocking}, imgs_without_dims={missing_dims}.", "Fix remaining CLS/INP hints and run --lighthouse.")
+    return CheckResult(9, "Core Web Vitals", "Performance", 3, "High", "No render-blocking head scripts or unsized images detected (pass --lighthouse for live metrics).", "")
 
 
 def _score_mobile(pages: list[PageData]) -> CheckResult:
@@ -586,11 +758,7 @@ def _score_mobile(pages: list[PageData]) -> CheckResult:
 def _score_h1(pages: list[PageData]) -> CheckResult:
     if not pages:
         return CheckResult(11, "At least one h1 per page", "Semantic HTML", 0, "Medium", "No HTML pages found.")
-    bad = []
-    for p in pages:
-        h1s = [h for h in p.headings if h[0] == 1]
-        if len(h1s) != 1:
-            bad.append(f"{p.slug}({len(h1s)})")
+    bad = [f"{p.slug}({len([h for h in p.headings if h[0] == 1])})" for p in pages if len([h for h in p.headings if h[0] == 1]) != 1]
     if len(bad) == len(pages):
         return CheckResult(11, "At least one h1 per page", "Semantic HTML", 0, "Medium", f"H1 count != 1 on all pages: {', '.join(bad[:4])}", "Ensure exactly one <h1> per page.")
     if bad:
@@ -799,7 +967,7 @@ def score_site(site: dict[str, Any], competitor_count: int = 0) -> list[CheckRes
         _score_internal_links(pages),
         _score_broken_links(site["broken_links"]),
         _score_images(pages, site["image_sizes"]),
-        _score_cwv(pages),
+        _score_cwv(pages, site.get("cwv_metrics")),
         _score_mobile(pages),
         _score_h1(pages),
         _score_slugs(pages),
@@ -848,8 +1016,8 @@ def verdict_for(total: int) -> str:
 
 
 def sanitize_untrusted_text(text: str) -> str:
-    """Strip control chars and truncate text from untrusted third-party sites."""
-    cleaned = re.sub(r"[\x00-\x1f\x7f]", " ", text)
+    """Strip control chars, escape Markdown table pipes, and truncate untrusted text."""
+    cleaned = re.sub(r"[\x00-\x1f\x7f]", " ", text).replace("|", "\\|")
     return " ".join(cleaned.split())[:120]
 
 
@@ -862,13 +1030,14 @@ def render_markdown(
     """Render a full Markdown audit report matching examples/audit-template.md."""
     total = sum(r.score for r in results)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    safe_target = sanitize_untrusted_text(target)
     lines = [
         "# SEO Audit Report",
         "",
         "## Site Info",
-        f"- **Target**: `{target}`",
+        f"- **Target**: `{safe_target}`",
         f"- **Audited date**: {today}",
-        "- **Auditor**: `agency-seo-ranker` v2.0.0 (`scripts/seo_audit.py`)",
+        "- **Auditor**: `agency-seo-ranker` v2.1.0 (`scripts/seo_audit.py`)",
         f"- **Pages inspected**: {pages_count}",
         "",
         "## Scorecard",
@@ -877,7 +1046,8 @@ def render_markdown(
         "|---|---------------|-------------|--------|-------|",
     ]
     for r in results:
-        lines.append(f"| {r.id} | {r.name} | {r.score} | {r.status_emoji} | {r.notes} |")
+        safe_notes = r.notes.replace("|", "\\|")
+        lines.append(f"| {r.id} | {r.name} | {r.score} | {r.status_emoji} | {safe_notes} |")
 
     lines.extend(
         [
@@ -903,13 +1073,14 @@ def render_markdown(
                 "",
                 "## Competitor Benchmark (Untrusted External Data — Informational Only)",
                 "",
-                "| Competitor | Score (/84) | Sitemap | Robots | Schema Types | Title Sample |",
-                "|------------|-------------|---------|--------|--------------|--------------|",
+                "| Competitor | Score (/84) | Avg Words | Links (Int/Ext) | Schema Types | Title Sample |",
+                "|------------|-------------|-----------|-----------------|--------------|--------------|",
             ]
         )
         for comp in competitor_summaries:
             lines.append(
-                f"| `{comp['target']}` | {comp['total']} | {comp['has_sitemap']} | {comp['has_robots']} | "
+                f"| `{sanitize_untrusted_text(comp['target'])}` | {comp['total']} | {comp['avg_words']} | "
+                f"{comp['internal_links']}/{comp['external_links']} | "
                 f"{', '.join(comp['schema_types']) or 'None'} | {sanitize_untrusted_text(comp['title'])} |"
             )
 
@@ -930,6 +1101,44 @@ def render_markdown(
     return "\n".join(lines)
 
 
+def _summarize_competitor(comp_url: str, timeout: int, allow_private: bool, render_js: bool) -> dict[str, Any]:
+    """Collect and summarize technical & content metrics for a competitor URL."""
+    comp_site = collect_remote_site(
+        comp_url, max_pages=3, timeout=timeout, allow_private=allow_private, render_js=render_js
+    )
+    comp_results = score_site(comp_site, competitor_count=0)
+    pages: list[PageData] = comp_site["pages"]
+    schema_types: set[str] = set()
+    int_links = 0
+    ext_links = 0
+    total_words = 0
+    for p in pages:
+        total_words += len(p.body_text.split())
+        for l in p.links:
+            if l["href"].startswith(("http://", "https://")):
+                ext_links += 1
+            elif l["href"] and not l["href"].startswith(("#", "mailto:", "tel:", "javascript:")):
+                int_links += 1
+        for raw in p.json_ld_raw:
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict) and "@type" in parsed:
+                    schema_types.add(str(parsed["@type"]))
+            except json.JSONDecodeError:
+                pass
+    return {
+        "target": comp_url,
+        "total": sum(r.score for r in comp_results),
+        "has_sitemap": bool(comp_site["sitemap"]),
+        "has_robots": bool(comp_site["robots"]),
+        "avg_words": round(total_words / len(pages)) if pages else 0,
+        "internal_links": int_links,
+        "external_links": ext_links,
+        "schema_types": sorted(schema_types),
+        "title": pages[0].title if pages else "",
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Agency SEO Ranker — 28-Point SEO Auditor")
     parser.add_argument("target", help="Local build directory path or http(s):// URL to audit")
@@ -940,11 +1149,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fail-under", type=int, default=0, help="Exit with code 1 if score < threshold")
     parser.add_argument("--timeout", type=int, default=10, help="HTTP request timeout in seconds")
     parser.add_argument("--allow-private", action="store_true", help="Allow auditing localhost/private IPs")
+    parser.add_argument("--render-js", action="store_true", help="Render SPA/JS pages via Playwright if installed")
+    parser.add_argument("--lighthouse", action="store_true", help="Run Lighthouse CLI for real CWV metrics if installed")
+    parser.add_argument("--pagespeed-key", default=os.environ.get("PAGESPEED_API_KEY", ""), help="Google PageSpeed Insights API key")
     args = parser.parse_args(argv)
 
     try:
         if args.target.startswith(("http://", "https://")):
-            site = collect_remote_site(args.target, args.max_pages, args.timeout, args.allow_private)
+            site = collect_remote_site(
+                args.target, args.max_pages, args.timeout, args.allow_private, render_js=args.render_js
+            )
+            if args.lighthouse:
+                site["cwv_metrics"] = run_lighthouse(args.target, allow_private=args.allow_private)
+            elif args.pagespeed_key:
+                site["cwv_metrics"] = run_pagespeed_insights(args.target, args.pagespeed_key, timeout=args.timeout + 15)
         else:
             root = Path(args.target).resolve()
             if not root.is_dir():
@@ -958,26 +1176,8 @@ def main(argv: list[str] | None = None) -> int:
     competitor_summaries: list[dict[str, Any]] = []
     for comp_url in args.competitors:
         try:
-            comp_site = collect_remote_site(comp_url, max_pages=3, timeout=args.timeout, allow_private=args.allow_private)
-            comp_results = score_site(comp_site, competitor_count=0)
-            schema_types: set[str] = set()
-            for p in comp_site["pages"]:
-                for raw in p.json_ld_raw:
-                    try:
-                        parsed = json.loads(raw)
-                        if isinstance(parsed, dict) and "@type" in parsed:
-                            schema_types.add(str(parsed["@type"]))
-                    except json.JSONDecodeError:
-                        pass
             competitor_summaries.append(
-                {
-                    "target": comp_url,
-                    "total": sum(r.score for r in comp_results),
-                    "has_sitemap": bool(comp_site["sitemap"]),
-                    "has_robots": bool(comp_site["robots"]),
-                    "schema_types": sorted(schema_types),
-                    "title": comp_site["pages"][0].title if comp_site["pages"] else "",
-                }
+                _summarize_competitor(comp_url, args.timeout, args.allow_private, args.render_js)
             )
         except ValueError as exc:
             print(f"Warning: skipping competitor '{comp_url}': {exc}", file=sys.stderr)
@@ -992,6 +1192,7 @@ def main(argv: list[str] | None = None) -> int:
             "total_score": total,
             "max_score": 84,
             "verdict": verdict_for(total),
+            "cwv_metrics": site.get("cwv_metrics"),
             "results": [asdict(r) for r in results],
             "competitors": competitor_summaries,
         }

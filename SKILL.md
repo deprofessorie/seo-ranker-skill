@@ -28,8 +28,8 @@ Run the bundled zero-dependency Python auditor first to get deterministic baseli
 # Audit a local build directory (e.g., dist/, out/, public/, or .)
 python scripts/seo_audit.py ./dist
 
-# Audit a live URL with competitor benchmarking and JSON output
-python scripts/seo_audit.py https://example.com --competitors https://comp1.com https://comp2.com --format json
+# Audit a live URL with JS rendering, real Lighthouse CWV, and competitor benchmarking
+python scripts/seo_audit.py https://example.com --render-js --lighthouse --competitors https://comp1.com https://comp2.com --format json
 ```
 
 Use `--allow-private` only when intentionally auditing a local dev server (`localhost` / `127.0.0.1`). Then review any manual/visual items (Core Web Vitals in Lighthouse, Apple HIG visual polish, and legal compliance) before finalizing the report.

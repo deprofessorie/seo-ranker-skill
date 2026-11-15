@@ -26,8 +26,8 @@ Run deterministic checks with zero external dependencies (Python 3 stdlib only):
 # Local build directory
 python scripts/seo_audit.py ./dist
 
-# Live URL + competitor benchmark + JSON output
-python scripts/seo_audit.py https://example.com --competitors https://comp1.com --format json
+# Live URL + JS rendering (Playwright) + real CWV (Lighthouse) + competitor benchmark
+python scripts/seo_audit.py https://example.com --render-js --lighthouse --competitors https://comp1.com --format json
 ```
 
 ## Supported agents

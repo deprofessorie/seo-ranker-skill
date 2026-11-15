@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 import unittest
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -150,6 +151,47 @@ class TestSEOAudit(unittest.TestCase):
             report = json.loads(out_file.read_text(encoding="utf-8"))
             self.assertEqual(report["max_score"], 84)
             self.assertEqual(len(report["results"]), 28)
+
+    def test_redirect_ssrf_handler_blocks_private_target(self) -> None:
+        handler = seo_audit.SafeRedirectHandler(allow_private=False)
+        req = urllib.request.Request("https://example.com/")
+        with self.assertRaises(ValueError):
+            handler.redirect_request(req, None, 302, "Found", {}, "http://127.0.0.1/admin")
+        with self.assertRaises(ValueError):
+            handler.redirect_request(req, None, 301, "Moved", {}, "http://169.254.169.254/latest/meta-data/")
+
+    def test_hreflang_meta_description_and_markdown_escape(self) -> None:
+        html = """<!DOCTYPE html><html lang="en"><head>
+        <title>Example Product Page | Brand Name</title>
+        <meta name="description" content="Detailed description for SEO testing.">
+        <link rel="canonical" href="https://example.com/en">
+        <link rel="alternate" hreflang="en" href="https://example.com/en">
+        <link rel="alternate" hreflang="es" href="https://example.com/es">
+        </head><body><h1>Main Heading</h1></body></html>"""
+        page = seo_audit.parse_html(html, "https://example.com/en", "/en")
+        self.assertEqual(page.hreflangs, ["en", "es"])
+        self.assertEqual(page.meta_description, "Detailed description for SEO testing.")
+        self.assertEqual(seo_audit._score_titles([page]).score, 3)
+        self.assertIn("hreflang_pages=1/1", seo_audit._score_canonical([page]).notes)
+        self.assertEqual(seo_audit.sanitize_untrusted_text("Evil | Title\nInjection"), "Evil \\| Title Injection")
+
+    def test_lighthouse_metrics_parsing_and_cwv_scoring(self) -> None:
+        sample_lhr = {
+            "categories": {"performance": {"score": 0.96}},
+            "audits": {
+                "largest-contentful-paint": {"numericValue": 1850.4},
+                "interaction-to-next-paint": {"numericValue": 120.0},
+                "cumulative-layout-shift": {"numericValue": 0.04},
+            },
+        }
+        metrics = seo_audit.parse_lighthouse_metrics(sample_lhr)
+        self.assertEqual(metrics["performance_score"], 96)
+        self.assertEqual(metrics["lcp_ms"], 1850)
+        self.assertEqual(metrics["inp_ms"], 120)
+        self.assertEqual(metrics["cls"], 0.04)
+        res = seo_audit._score_cwv([], metrics)
+        self.assertEqual(res.score, 3)
+        self.assertIn("LCP=1850ms", res.notes)
 
 
 if __name__ == "__main__":
